@@ -33,7 +33,7 @@ class SourceNormalizationTests(unittest.TestCase):
         self.assertEqual({m["security_code"] for m in snapshots[0].members}, {"000001", "600000"})
 
     def test_a_share_code_filter(self):
-        valid = ["000001", "300750", "600000", "688001", "920001", "830799"]
+        valid = ["000001", "300750", "302132", "600000", "688001", "920001", "830799"]
         invalid = ["399001", "510300", "900901", "200002", "00700", "600000.SH"]
         for code in valid:
             with self.subTest(code=code):

@@ -41,15 +41,25 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(actions[("2026-11-02", "300750")], "ADD")
             self.assertEqual(actions[("2026-11-02", "000001")], "REMOVE")
 
-    def test_mixed_non_a_share_state_is_not_emitted(self):
+    def test_mixed_non_a_share_state_retains_a_share_subset(self):
         with tempfile.TemporaryDirectory() as tmp:
             mixed = self._snapshot("2026-10-30", ["600000", "00700"], "hash1")
             result = FetchResult(self.ref, "ok", [mixed], "CSINDEX_OFFICIAL_FILE", mixed.source_url, "hash1")
             summary = persist_results(Path(tmp), [self.ref], [result], "2026-10-30T08:30:00+00:00", "run1")
-            self.assertEqual(summary["new_events"], 0)
+            self.assertEqual(summary["new_events"], 1)
             with (Path(tmp) / "observations.csv").open(encoding="utf-8", newline="") as f:
                 row = next(csv.DictReader(f))
             self.assertEqual(row["source_status"], "partial_non_a_members")
+            with (Path(tmp) / "membership_events.csv").open(encoding="utf-8", newline="") as f:
+                events = list(csv.DictReader(f))
+            self.assertEqual([(event["security_code"], event["action"]) for event in events], [("600000", "BASELINE")])
+
+    def test_non_a_share_only_state_is_not_emitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = self._snapshot("2026-10-30", ["00700"], "hash1")
+            result = FetchResult(self.ref, "ok", [snapshot], "CSINDEX_OFFICIAL_FILE", snapshot.source_url, "hash1")
+            summary = persist_results(Path(tmp), [self.ref], [result], "2026-10-30T08:30:00+00:00", "run1")
+            self.assertEqual(summary["new_events"], 0)
 
     def test_cni_daily_snapshot_diffs_previous_state(self):
         with tempfile.TemporaryDirectory() as tmp:

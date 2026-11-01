@@ -118,8 +118,8 @@ def _event_rows(
 ) -> tuple[list[dict[str, Any]], set[str], str]:
     current, all_a = _filtered_a_share_members(snapshot)
     digest = _state_hash(current)
-    if not all_a:
-        return [], current, "mixed_or_non_a_share_members"
+    if not current:
+        return [], current, "no_a_share_members"
     if previous is None:
         changes = [("BASELINE", code) for code in sorted(current)]
     else:
@@ -199,7 +199,7 @@ def persist_results(
             note = (note + "; " if note else "") + "source supplied no usable date; no PIT event emitted"
         elif latest_snapshot and not all_a:
             observation_status = "partial_non_a_members"
-            note = (note + "; " if note else "") + "sample contains non-A-share or non-equity identifiers; not used as an A-share PIT fact"
+            note = (note + "; " if note else "") + "non-A-share identifiers excluded; recognized A-share members are retained as a partial state"
 
         obs_key = (run_id, result.index.provider, result.index.code)
         if obs_key not in known_observation_keys:
@@ -223,7 +223,7 @@ def persist_results(
             })
             known_observation_keys.add(obs_key)
 
-        if not latest_snapshot or not latest_snapshot.source_date or not all_a:
+        if not latest_snapshot or not latest_snapshot.source_date or not member_codes:
             continue
 
         if result.index.provider == "CNI" and len(snapshots) > 1:

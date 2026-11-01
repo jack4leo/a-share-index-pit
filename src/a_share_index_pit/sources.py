@@ -95,6 +95,9 @@ def is_a_share_equity_code(code: str) -> bool:
     value = _code(code)
     if not value.isdigit() or len(value) != 6:
         return False
+    # Verified Shenzhen-listed A-share code change: 300114 became 302132 in 2025.
+    if value == "302132":
+        return True
     return value.startswith(
         (
             "000", "001", "002", "003", "300", "301",  # Shenzhen
