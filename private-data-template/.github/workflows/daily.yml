@@ -2,8 +2,8 @@ name: Daily A-share index PIT collection
 
 on:
   schedule:
-    # 16:30 China Standard Time (UTC+8), weekdays; source timing may lag on holidays.
-    - cron: "30 8 * * 1-5"
+    # Every day at 16:30 China Standard Time (UTC+8); weekends/holidays may repeat the last source state.
+    - cron: "30 8 * * *"
   workflow_dispatch:
     inputs:
       limit:

@@ -27,7 +27,7 @@ python -m pip install -r requirements.txt
 python scripts/collect.py --data-dir ./data --limit 5 --dry-run
 ```
 
-移除 `--limit 5 --dry-run` 才会写入数据文件。私有仓库示例工作流位于 [`private-data-template/.github/workflows/daily.yml`](private-data-template/.github/workflows/daily.yml)，按北京时间交易日 16:30 触发（GitHub cron 使用 UTC）。实际部署时，工作流检出本公开仓库代码，并将数据写回私有数据仓库。
+移除 `--limit 5 --dry-run` 才会写入数据文件。私有仓库示例工作流位于 [`private-data-template/.github/workflows/daily.yml`](private-data-template/.github/workflows/daily.yml)，每天北京时间 16:30 触发（GitHub cron 使用 UTC）。周末和节假日若来源状态不变，只增加观测，不生成虚假的成员变更。实际部署时，工作流检出本公开仓库代码，并将数据写回私有数据仓库。
 
 ## 数据模型
 
