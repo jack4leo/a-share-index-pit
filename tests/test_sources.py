@@ -1,9 +1,16 @@
+import json
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
 from a_share_index_pit.models import IndexRef
-from a_share_index_pit.sources import _normalize_cni, _normalize_csindex, is_a_share_equity_code
+from a_share_index_pit.sources import (
+    _normalize_cni,
+    _normalize_csindex,
+    discover_cni,
+    is_a_share_equity_code,
+)
 
 
 class SourceNormalizationTests(unittest.TestCase):
@@ -41,6 +48,44 @@ class SourceNormalizationTests(unittest.TestCase):
         for code in invalid:
             with self.subTest(code=code):
                 self.assertFalse(is_a_share_equity_code(code))
+
+    def test_cni_catalog_accepts_980_codes_and_uses_official_visibility(self):
+        payload = {
+            "total": 5,
+            "data": {
+                "total": 5,
+                "rows": [
+                    {"indexcode": "399001", "indexname": "深证成指", "showcnindex": "1", "indextype": "100", "samplesize": 500},
+                    {"indexcode": "980001", "indexname": "湾创100", "showcnindex": "1", "indextype": "200", "samplesize": 100},
+                    {"indexcode": "98000600", "indexname": "港股通自由现金流（人民币）", "showcnindex": 1, "indextype": "104", "samplesize": 50},
+                    {"indexcode": "CESAIT", "indexname": "中华陆股通行业龙头", "showcnindex": "1", "indextype": "203", "samplesize": 30},
+                    {"indexcode": "980002", "indexname": "隐藏条目", "showcnindex": "0", "indextype": "200", "samplesize": 100},
+                ],
+            },
+        }
+        with patch("a_share_index_pit.sources.request_bytes", return_value=json.dumps(payload).encode()):
+            refs = discover_cni(object())
+
+        self.assertEqual({ref.code for ref in refs}, {"399001", "980001", "98000600", "CESAIT"})
+        ref_980 = next(ref for ref in refs if ref.code == "980001")
+        self.assertEqual(ref_980.source_provider, "CNI_OFFICIAL_CATALOG")
+        self.assertIn("index_type=200", ref_980.note)
+        self.assertIn("catalog_sample_size=100", ref_980.note)
+
+    def test_cni_catalog_rejects_incomplete_pagination(self):
+        first_page = {
+            "data": {"total": 3, "rows": [
+                {"indexcode": "980001", "indexname": "湾创100", "showcnindex": "1", "indextype": "200", "samplesize": 100},
+                {"indexcode": "399001", "indexname": "深证成指", "showcnindex": "1", "indextype": "100", "samplesize": 500},
+            ]},
+        }
+        second_page = {"data": {"total": 3, "rows": []}}
+        with patch(
+            "a_share_index_pit.sources.request_bytes",
+            side_effect=[json.dumps(first_page).encode(), json.dumps(second_page).encode()],
+        ):
+            with self.assertRaisesRegex(ValueError, "ended at 2 of 3"):
+                discover_cni(object())
 
 
 if __name__ == "__main__":

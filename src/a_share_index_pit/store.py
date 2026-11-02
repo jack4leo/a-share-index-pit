@@ -24,6 +24,10 @@ EVENT_FIELDS = [
     "action", "observed_at", "source_provider", "source_url", "source_sha256", "state_hash",
     "valid_boundary", "confidence", "revision_of", "parser_version",
 ]
+RUN_DIAGNOSTIC_FIELDS = [
+    "run_id", "observed_at", "indexes", "successful", "failed", "catalog_errors",
+    "catalog_complete", "status", "message",
+]
 
 
 def _read_csv(path: Path, fields: list[str]) -> list[dict[str, str]]:
@@ -34,6 +38,23 @@ def _read_csv(path: Path, fields: list[str]) -> list[dict[str, str]]:
         if not reader.fieldnames:
             return []
         return [{field: row.get(field, "") or "" for field in fields} for row in reader]
+
+
+def load_catalog_refs(data_dir: str | Path) -> list[IndexRef]:
+    """Load the last persisted complete candidate catalog, if present."""
+    rows = _read_csv(Path(data_dir) / "index_catalog.csv", CATALOG_FIELDS)
+    return [
+        IndexRef(
+            provider=row["provider"],
+            code=row["index_code"],
+            name=row["index_name"],
+            catalog_url=row["catalog_url"],
+            source_provider=row["source_provider"],
+            note=row["note"],
+        )
+        for row in rows
+        if row["provider"] and row["index_code"] and row["index_name"]
+    ]
 
 
 def _write_csv(path: Path, fields: list[str], rows: list[dict[str, Any]]) -> None:
@@ -162,6 +183,11 @@ def persist_results(
     observed_at: str,
     run_id: str,
     catalog_errors: list[dict[str, str]] | None = None,
+    *,
+    catalog_complete: bool = True,
+    catalog_refs: list[IndexRef] | None = None,
+    run_status: str = "completed",
+    run_message: str = "",
 ) -> dict[str, int]:
     root = Path(data_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -170,8 +196,9 @@ def persist_results(
         "provider": ref.provider, "index_code": ref.code, "index_name": ref.name,
         "catalog_url": ref.catalog_url, "source_provider": ref.source_provider,
         "candidate_scope": "candidate_pending_sample_validation", "note": ref.note,
-    } for ref in refs]
-    _write_csv(root / "index_catalog.csv", CATALOG_FIELDS, catalog_rows)
+    } for ref in (catalog_refs if catalog_refs is not None else refs)]
+    if catalog_complete:
+        _write_csv(root / "index_catalog.csv", CATALOG_FIELDS, catalog_rows)
 
     latest_path = root / "latest_state.json"
     latest_state = json.loads(latest_path.read_text(encoding="utf-8")) if latest_path.exists() else {}
@@ -194,13 +221,85 @@ def persist_results(
         membership_hash = _state_hash(member_codes) if member_codes else ""
         observation_status = result.status
         note = result.message
-        if latest_snapshot and not latest_snapshot.source_date:
+        key = result.index.key
+        prior = latest_state.get(key)
+        previous_date = prior.get("source_date", "") if prior else ""
+        is_stale = bool(
+            latest_snapshot
+            and latest_snapshot.source_date
+            and previous_date
+            and latest_snapshot.source_date < previous_date
+        )
+        if is_stale:
+            observation_status = "stale_snapshot"
+            note = (note + "; " if note else "") + (
+                f"source effective date {latest_snapshot.source_date} is older than "
+                f"the last accepted date {previous_date}; state and events were not changed"
+            )
+        elif latest_snapshot and not latest_snapshot.source_date:
             observation_status = "no_source_date"
             note = (note + "; " if note else "") + "source supplied no usable date; no PIT event emitted"
         elif latest_snapshot and not all_a:
             observation_status = "partial_non_a_members"
             note = (note + "; " if note else "") + "non-A-share identifiers excluded; recognized A-share members are retained as a partial state"
 
+        if latest_snapshot and latest_snapshot.source_date and member_codes and not is_stale:
+            if result.index.provider == "CNI" and len(snapshots) > 1:
+                # Only replay multiple dated states when the source file actually supplies them.
+                previous: set[str] | None = None
+                for snapshot in snapshots:
+                    if not snapshot.source_date:
+                        continue
+                    event_rows, current, validation = _event_rows(result.index, snapshot, previous, observed_at)
+                    if validation != "ok":
+                        continue
+                    for row in event_rows:
+                        if row["event_id"] not in known_event_ids:
+                            new_events.append(row)
+                            known_event_ids.add(row["event_id"])
+                    previous = current
+                if previous is not None:
+                    latest_state[key] = {
+                        "source_date": snapshots[-1].source_date,
+                        "members": sorted(previous),
+                        "membership_hash": _state_hash(previous),
+                        "source_sha256": latest_snapshot.source_sha256,
+                        "observed_at": observed_at,
+                        "confidence": "history_start_unverified",
+                    }
+            else:
+                # Single-date CNI and CSI files are observed current states; compare them
+                # with the previous daily observation instead of inventing a new baseline.
+                previous = set(prior.get("members", [])) if prior else None
+                current = member_codes
+                if previous_date == latest_snapshot.source_date and previous is not None and previous != current:
+                    event_rows, _, validation = _event_rows(result.index, latest_snapshot, previous, observed_at, correction=True)
+                    if validation == "ok":
+                        for row in event_rows:
+                            if row["event_id"] not in known_event_ids:
+                                new_events.append(row)
+                                known_event_ids.add(row["event_id"])
+                    latest_state[key] = {
+                        "source_date": latest_snapshot.source_date, "members": sorted(current),
+                        "membership_hash": membership_hash, "source_sha256": latest_snapshot.source_sha256,
+                        "observed_at": observed_at, "confidence": "review_same_date_revision",
+                    }
+                elif not previous_date or latest_snapshot.source_date > previous_date:
+                    event_rows, _, validation = _event_rows(result.index, latest_snapshot, previous, observed_at)
+                    if validation == "ok":
+                        for row in event_rows:
+                            if row["event_id"] not in known_event_ids:
+                                new_events.append(row)
+                                known_event_ids.add(row["event_id"])
+                    latest_state[key] = {
+                        "source_date": latest_snapshot.source_date, "members": sorted(current),
+                        "membership_hash": membership_hash, "source_sha256": latest_snapshot.source_sha256,
+                        "observed_at": observed_at, "confidence": latest_snapshot.confidence,
+                    }
+            _write_normalized_history(root, result)
+
+        # Write the observation only after the stale/revision decision so its status
+        # matches the state/event handling above and retains this run's source_asof.
         obs_key = (run_id, result.index.provider, result.index.code)
         if obs_key not in known_observation_keys:
             new_observations.append({
@@ -223,70 +322,6 @@ def persist_results(
             })
             known_observation_keys.add(obs_key)
 
-        if not latest_snapshot or not latest_snapshot.source_date or not member_codes:
-            continue
-
-        if result.index.provider == "CNI" and len(snapshots) > 1:
-            # Only replay multiple dated states when the source file actually supplies them.
-            previous: set[str] | None = None
-            for snapshot in snapshots:
-                if not snapshot.source_date:
-                    continue
-                event_rows, current, validation = _event_rows(result.index, snapshot, previous, observed_at)
-                if validation != "ok":
-                    continue
-                for row in event_rows:
-                    if row["event_id"] not in known_event_ids:
-                        new_events.append(row)
-                        known_event_ids.add(row["event_id"])
-                previous = current
-            if previous is not None:
-                latest_state[result.index.key] = {
-                    "source_date": snapshots[-1].source_date,
-                    "members": sorted(previous),
-                    "membership_hash": _state_hash(previous),
-                    "source_sha256": latest_snapshot.source_sha256,
-                    "observed_at": observed_at,
-                    "confidence": "history_start_unverified",
-                }
-        else:
-            # Single-date CNI and CSI files are observed current states; compare them
-            # with the previous daily observation instead of inventing a new baseline.
-            key = result.index.key
-            prior = latest_state.get(key)
-            previous = set(prior.get("members", [])) if prior else None
-            previous_date = prior.get("source_date", "") if prior else ""
-            current = member_codes
-            if previous_date and latest_snapshot.source_date < previous_date:
-                # Never move the latest state backward when an upstream file is stale.
-                observation_status = "stale_snapshot"
-            elif previous_date == latest_snapshot.source_date and previous is not None and previous != current:
-                event_rows, _, validation = _event_rows(result.index, latest_snapshot, previous, observed_at, correction=True)
-                if validation == "ok":
-                    for row in event_rows:
-                        if row["event_id"] not in known_event_ids:
-                            new_events.append(row)
-                            known_event_ids.add(row["event_id"])
-                latest_state[key] = {
-                    "source_date": latest_snapshot.source_date, "members": sorted(current),
-                    "membership_hash": membership_hash, "source_sha256": latest_snapshot.source_sha256,
-                    "observed_at": observed_at, "confidence": "review_same_date_revision",
-                }
-            elif not previous_date or latest_snapshot.source_date > previous_date:
-                event_rows, _, validation = _event_rows(result.index, latest_snapshot, previous, observed_at)
-                if validation == "ok":
-                    for row in event_rows:
-                        if row["event_id"] not in known_event_ids:
-                            new_events.append(row)
-                            known_event_ids.add(row["event_id"])
-                latest_state[key] = {
-                    "source_date": latest_snapshot.source_date, "members": sorted(current),
-                    "membership_hash": membership_hash, "source_sha256": latest_snapshot.source_sha256,
-                    "observed_at": observed_at, "confidence": latest_snapshot.confidence,
-                }
-
-        _write_normalized_history(root, result)
-
     _append_csv(root / "observations.csv", OBSERVATION_FIELDS, new_observations)
     _append_csv(root / "membership_events.csv", EVENT_FIELDS, new_events)
     latest_path.write_text(json.dumps(latest_state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -295,5 +330,18 @@ def persist_results(
         _append_csv(root / "catalog_errors.csv", ["observed_at", "run_id", "catalog", "status", "message"],
                     [{"observed_at": observed_at, "run_id": run_id, **row} for row in catalog_errors])
 
+    _append_csv(root / "collection_runs.csv", RUN_DIAGNOSTIC_FIELDS, [{
+        "run_id": run_id,
+        "observed_at": observed_at,
+        "indexes": len(refs),
+        "successful": success_count,
+        "failed": failed_count,
+        "catalog_errors": len(catalog_errors or []),
+        "catalog_complete": str(bool(catalog_complete)).lower(),
+        "status": run_status,
+        "message": run_message,
+    }])
+
     return {"indexes": len(refs), "successful": success_count, "failed": failed_count,
-            "new_observations": len(new_observations), "new_events": len(new_events)}
+            "new_observations": len(new_observations), "new_events": len(new_events),
+            "catalog_errors": len(catalog_errors or [])}

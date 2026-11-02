@@ -117,34 +117,58 @@ def _publisher_for_joinquant(code: str) -> str:
 
 
 def discover_cni(session: requests.Session) -> list[IndexRef]:
-    """Discover CNI-listed candidates; data classification happens after fetch."""
-    body = request_bytes(
-        session,
-        CNI_CATALOG_URL,
-        params={"channelCode": "-1", "rows": "2000", "pageNum": "1"},
-    )
-    payload = json.loads(body.decode("utf-8-sig"))
-    rows = ((payload.get("data") or {}).get("rows") or [])
+    """Discover every visible CNI index from the official catalog."""
     results: list[IndexRef] = []
-    for row in rows:
-        code = _code(row.get("indexcode"))
-        name = _text(row.get("indexname"))
-        if not code.startswith("399") or not name:
-            continue
-        sample_size = pd.to_numeric(row.get("samplesize"), errors="coerce")
-        # Keep zero-size rows as discovered candidates; they may be new, inactive,
-        # non-equity or temporarily unavailable and must not silently disappear.
-        note = "catalog_sample_size=" + ("unknown" if pd.isna(sample_size) else str(int(sample_size)))
-        results.append(
-            IndexRef(
-                provider="CNI",
-                code=code,
-                name=name,
-                catalog_url="https://www.cnindex.com.cn/zh_indices/sese/index.html?act_menu=1&index_type=-1",
-                source_provider="CNI",
-                note=note,
-            )
+    page_size = 2000
+    page_num = 1
+    total: int | None = None
+    received = 0
+    catalog_url = "https://www.cnindex.com.cn/zh_indices/sese/index.html?act_menu=1&index_type=-1"
+    while total is None or received < total:
+        body = request_bytes(
+            session,
+            CNI_CATALOG_URL,
+            params={"channelCode": "-1", "rows": str(page_size), "pageNum": str(page_num)},
         )
+        payload = json.loads(body.decode("utf-8-sig"))
+        data = payload.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("rows"), list):
+            raise ValueError("CNI official catalog response has no data.rows list")
+        rows = data["rows"]
+        if total is None:
+            total = int(data.get("total") or payload.get("total") or len(rows))
+            if total <= 0:
+                raise ValueError("CNI official catalog reported no rows")
+        if not rows and received < total:
+            raise ValueError(f"CNI official catalog ended at {received} of {total} rows")
+        for row in rows:
+            code = _code(row.get("indexcode"))
+            name = _text(row.get("indexname"))
+            visible = _text(row.get("showcnindex")).casefold() in {"1", "true", "yes"}
+            if not visible or not re.fullmatch(r"[A-Z0-9]{1,16}", code) or not name:
+                continue
+            sample_size = pd.to_numeric(row.get("samplesize"), errors="coerce")
+            index_type = _text(row.get("indextype")) or "unknown"
+            note = f"official_visible=1; index_type={index_type}; catalog_sample_size=" + (
+                "unknown" if pd.isna(sample_size) else str(int(sample_size))
+            )
+            results.append(
+                IndexRef(
+                    provider="CNI",
+                    code=code,
+                    name=name,
+                    catalog_url=catalog_url,
+                    source_provider="CNI_OFFICIAL_CATALOG",
+                    note=note,
+                )
+            )
+        received += len(rows)
+        if received < total:
+            page_num += 1
+    if received < total:
+        raise ValueError(f"CNI official catalog is incomplete: received {received} of {total} rows")
+    if not results:
+        raise ValueError("CNI official catalog contained no visible valid index entries")
     return results
 
 
@@ -160,6 +184,7 @@ def discover_csindex(session: requests.Session, page_size: int = 200) -> list[In
     for series_id, family_name in families.items():
         page_num = 1
         total = None
+        received = 0
         while total is None or (page_num - 1) * page_size < total:
             body = {
                 "sorter": {"sortField": "null", "sortOrder": None},
@@ -200,6 +225,7 @@ def discover_csindex(session: requests.Session, page_size: int = 200) -> list[In
                 raise ValueError(f"unexpected CSI catalog page type: {type(rows).__name__}")
             if total is None:
                 total = int(payload.get("total") or 0)
+            received += len(rows)
             for row in rows:
                 code = _code(row.get("indexCode"))
                 name = _text(row.get("indexName"))
@@ -220,10 +246,18 @@ def discover_csindex(session: requests.Session, page_size: int = 200) -> list[In
                     source_provider="CSINDEX_OFFICIAL_CATALOG",
                     note=f"series={series_id}; asset_class={asset_class}; region={region}",
                 ))
-            if not rows or len(rows) < page_size:
+            if not rows:
+                if received < total:
+                    raise ValueError(f"CSI catalog series {series_id} ended at {received} of {total} rows")
+                break
+            if len(rows) < page_size:
+                if received < total:
+                    raise ValueError(f"CSI catalog series {series_id} is incomplete: received {received} of {total} rows")
                 break
             page_num += 1
 
+    if not results:
+        raise ValueError("CSI official catalog contained no eligible mainland equity indexes")
     return results
 
 
