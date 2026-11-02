@@ -11,30 +11,66 @@ on:
         required: false
         type: string
 
-permissions:
-  contents: write
+env:
+  # Full immutable commit SHA; update only when intentionally promoting collector code.
+  COLLECTOR_COMMIT: "6ea9f1013b78270d0499b3bd046e50be99b33988"
 
 concurrency:
   group: daily-a-share-index-pit
   cancel-in-progress: false
 
 jobs:
+  prepare-state:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout private data repository (read only)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare state artifact
+        run: |
+          mkdir -p data
+          touch data/.workflow-state-placeholder
+
+      - name: Upload prior private data state
+        uses: actions/upload-artifact@v4
+        with:
+          name: prior-data-state
+          path: data/
+          include-hidden-files: true
+          if-no-files-found: error
+
   collect:
+    needs: prepare-state
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    # No repository token permissions in the job that executes public collector code.
+    permissions:
+      contents: none
     steps:
-      - name: Checkout private data repository
-        uses: actions/checkout@v4
+      - name: Download prior private data state
+        uses: actions/download-artifact@v4
         with:
-          fetch-depth: 0
+          name: prior-data-state
+          path: data
 
-      - name: Checkout public collector code
-        uses: actions/checkout@v4
-        with:
-          repository: jack4leo/a-share-index-pit
-          ref: main
-          path: collector
-          persist-credentials: false
+      - name: Remove empty-state placeholder
+        run: rm -f data/.workflow-state-placeholder
+
+      - name: Checkout pinned public collector commit
+        run: |
+          if [[ ! "$COLLECTOR_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "COLLECTOR_COMMIT must be a full immutable Git commit SHA" >&2
+            exit 2
+          fi
+          git init collector
+          git -C collector remote add origin https://github.com/jack4leo/a-share-index-pit.git
+          git -C collector fetch --depth=1 origin "$COLLECTOR_COMMIT"
+          git -C collector checkout --detach FETCH_HEAD
+          test "$(git -C collector rev-parse HEAD)" = "$COLLECTOR_COMMIT"
 
       - uses: actions/setup-python@v5
         with:
@@ -48,18 +84,96 @@ jobs:
       - name: Collect index observations
         env:
           LIMIT: ${{ github.event.inputs.limit }}
+        shell: bash
         run: |
           args=(--data-dir "$GITHUB_WORKSPACE/data" --workers 4)
           if [[ -n "$LIMIT" ]]; then args+=(--limit "$LIMIT"); fi
-          PYTHONPATH="$GITHUB_WORKSPACE/collector/src" python -m a_share_index_pit.collector "${args[@]}"
+          set +e
+          PYTHONPATH="$GITHUB_WORKSPACE/collector/src" \
+            python -m a_share_index_pit.collector "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/collector.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [[ "$status" -ne 0 ]]; then
+            mkdir -p data/diagnostics
+            cp "$RUNNER_TEMP/collector.log" \
+              "data/diagnostics/collector-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+          fi
+          exit "$status"
 
-      - name: Commit private observations and membership events
+      - name: Record runner-level failure
+        if: failure()
+        run: |
+          mkdir -p data/diagnostics
+          printf 'Collection job failed before a clean completion. Inspect Actions logs for run %s, attempt %s.\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            > "data/diagnostics/runner-failure-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+
+      - name: Upload collected private data and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collected-data
+          path: data/
+          include-hidden-files: true
+          if-no-files-found: error
+
+  commit-results:
+    needs: [prepare-state, collect]
+    if: ${{ always() && needs.prepare-state.result == 'success' && needs.collect.result != 'cancelled' && needs.collect.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout private data repository (write only in this job)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download collected data artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: collected-data
+          path: ${{ runner.temp }}/collected-data
+
+      - name: Validate and install data artifact
+        env:
+          DATA_PAYLOAD: ${{ runner.temp }}/collected-data
+        run: |
+          python - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          source = Path(os.environ["DATA_PAYLOAD"])
+          if not source.is_dir():
+              raise SystemExit("collected data artifact is missing")
+          for item in source.rglob("*"):
+              relative = item.relative_to(source)
+              if ".git" in relative.parts:
+                  raise SystemExit("refusing to install a nested .git path")
+              if item.is_symlink():
+                  raise SystemExit(f"refusing to install symlink: {relative}")
+              if not item.is_file() and not item.is_dir():
+                  raise SystemExit(f"refusing special file: {relative}")
+
+          staged = Path("data.new")
+          if staged.exists():
+              shutil.rmtree(staged)
+          shutil.copytree(source, staged)
+          (staged / ".workflow-state-placeholder").unlink(missing_ok=True)
+          current = Path("data")
+          if current.exists():
+              shutil.rmtree(current)
+          staged.rename(current)
+          PY
+
+      - name: Commit private observations and diagnostics
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data
+          git add -- data
           if ! git diff --cached --quiet; then
-            git commit -m "data: daily A-share index PIT observations"
+            git commit -m "data: daily A-share PIT observations"
             git push
           else
             echo "No data changes to commit."

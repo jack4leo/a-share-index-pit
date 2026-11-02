@@ -14,11 +14,19 @@
 
 ### `index_catalog.csv`
 
-每次运行从来源目录更新候选清单。`candidate_scope` 初始为 `candidate_pending_sample_validation`，不代表已经完整确认属于 A 股权益指数。
+只有官方目录发现完整时才更新候选清单。若任一目录来源不可用，`index_catalog.csv` 保持上次完整版本；采集器会将该来源上次的候选项与本次可用来源的结果合并后继续抓取。`candidate_scope` 初始为 `candidate_pending_sample_validation`，不代表已经完整确认属于 A 股权益指数。
 
 ### `observations.csv`
 
-按 `run_id + provider + index_code` 记录一次采集结果。状态包括 `ok`、`ok_secondary`、`fetch_failed`、`empty_source`、`partial_non_a_members`、`stale_snapshot` 等。错误和空结果始终与“没有成分变化”区分开。
+按 `run_id + provider + index_code` 记录一次采集结果。状态包括 `ok`、`ok_secondary`、`fetch_failed`、`empty_source`、`partial_non_a_members`、`stale_snapshot` 等。发生来源日期回退时，仍保留该快照的 `source_asof` 和本次 `observed_at`，但不更新最新状态或产生事件。错误和空结果始终与“没有成分变化”区分开。
+
+### `catalog_errors.csv`
+
+逐次追加目录发现失败记录，包括 `observed_at`、`run_id`、失败的目录来源、状态和具体错误消息。它与逐指数的 `observations.csv` 分开，便于区分目录不可用和成分文件抓取失败。
+
+### `collection_runs.csv`
+
+逐次记录运行级索引数、成功/失败数、目录是否完整、运行状态和简短摘要。即使没有发现候选，或所有指数抓取失败，也会先持久化这条记录再让进程以失败状态退出。
 
 ### `membership_events.csv`
 
