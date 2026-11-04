@@ -34,7 +34,7 @@ python scripts/collect.py --data-dir ./data --limit 5 --dry-run
 - `data/catalog_errors.csv`：目录来源不可用或目录发现失败时的来源级错误。
 - `data/collection_runs.csv`：每次运行的成功/失败计数、目录完整性和运行状态。
 - `data/observations.csv`：每次按指数的观测、来源日期、数量、状态与 SHA-256。
-- `data/membership_events.csv`：首次基线、纳入和剔除事件；区间可由事件按有效日期还原。
+- `data/membership_events.csv`（或沿用已有的 `data/membership_events.csv.gz`）：首次基线、纳入和剔除事件；区间可由事件按有效日期还原。
 - `data/latest_state.json`：用于下一次差分的当前状态，不覆盖事件账本。
 - `data/source_history/`：按指数保存可得的历史样本标准化版本；私有数据仓库的 Git 历史保留版本变化。
 

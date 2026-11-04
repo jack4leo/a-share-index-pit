@@ -40,6 +40,8 @@ CNI 使用官网指数系列菜单的 `indextype` 类型码：100/200 规模、1
 
 ### `membership_events.csv`
 
+如果数据目录已有 `membership_events.csv.gz`，采集器会读取其中的事件用于去重，并继续向压缩账本追加；不会另建一份并行的明文事件账本。只有在没有既有 gzip 账本时才写普通 CSV。
+
 - `BASELINE`：首次观测到该指数的成员集合；只有从这次采集起才有观测证据，不应理解为更早历史的完整成员。
 - `ADD` / `REMOVE`：在后续样本状态中观察到的成员差分。CNI 当前快照与 CSI 当前文件均和 `latest_state.json` 做跨日差分；首次运行只写 `BASELINE`，不会把每日当前表逐日误写成完整历史。
 - `effective_date`：对应源文件日期；如果来源只给当前快照，可能是观察状态日期而非明确公告生效日。查询可观察状态时可用该日期；需要官方生效边界的研究必须结合公告校验 `valid_boundary` 与 `confidence`。

@@ -11,6 +11,7 @@ from a_share_index_pit.sources import (
     _normalize_csindex,
     discover_cni,
     discover_csindex,
+    fetch_eastmoney_current,
     is_a_share_equity_code,
 )
 
@@ -40,6 +41,31 @@ class SourceNormalizationTests(unittest.TestCase):
         snapshots = _normalize_csindex(frame, self.ref, "https://source/cons.xls", "def")
         self.assertEqual(snapshots[0].source_date, "2026-10-30")
         self.assertEqual({m["security_code"] for m in snapshots[0].members}, {"000001", "600000"})
+
+    def test_eastmoney_fallback_uses_only_latest_trade_date_members(self):
+        payload = {"result": {"data": [
+            {"TRADE_DATE": "2026-01-01", "SECURITY_CODE": "000001"},
+            {"TRADE_DATE": "2026-02-01", "SECURITY_CODE": "000002"},
+            {"TRADE_DATE": "", "SECURITY_CODE": "000003"},
+        ]}}
+
+        class Response:
+            content = json.dumps(payload).encode("utf-8")
+
+            def raise_for_status(self):
+                return None
+
+        class Session:
+            def get(self, _url, **_kwargs):
+                return Response()
+
+        result = fetch_eastmoney_current(Session(), self.ref)
+        self.assertEqual(result.status, "ok_secondary")
+        self.assertEqual(result.snapshots[0].source_date, "2026-02-01")
+        self.assertEqual(
+            [member["security_code"] for member in result.snapshots[0].members],
+            ["000002"],
+        )
 
     def test_a_share_code_filter(self):
         valid = ["000001", "300750", "302132", "600000", "688001", "920001", "830799"]
@@ -137,6 +163,59 @@ class SourceNormalizationTests(unittest.TestCase):
         self.assertEqual(ref.primary_category, "market_size")
         self.assertEqual(ref.universe_scope_tags, ("equity",))
         self.assertEqual(json.loads(ref.source_classification)["indexClassifyEn"], "Size")
+
+    def test_csindex_missing_total_paginates_until_short_page(self):
+        def row(code):
+            return {"indexCode": code, "indexName": code, "assetsClassify": "股票", "region": "境内"}
+
+        class Response:
+            def __init__(self, rows):
+                self.payload = {"code": "200", "data": rows}
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        class Session:
+            def __init__(self):
+                self.calls = []
+
+            def post(self, _url, json, **_kwargs):
+                series = json["indexFilter"]["indexSeries"][0]
+                page = json["pager"]["pageNum"]
+                self.calls.append((series, page))
+                if series == "1" and page == 1:
+                    return Response([row("000001"), row("000002")])
+                if series == "1" and page == 2:
+                    return Response([row("000003")])
+                return Response([])
+
+        session = Session()
+        refs = discover_csindex(session, page_size=2)
+        self.assertEqual([ref.code for ref in refs], ["000001", "000002", "000003"])
+        self.assertIn(("1", 2), session.calls)
+
+    def test_csindex_missing_total_repeated_full_page_fails_closed(self):
+        rows = [
+            {"indexCode": code, "indexName": code, "assetsClassify": "股票", "region": "境内"}
+            for code in ("000001", "000002")
+        ]
+
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"code": "200", "data": rows}
+
+        class Session:
+            def post(self, _url, **_kwargs):
+                return Response()
+
+        with self.assertRaisesRegex(ValueError, "repeated a page"):
+            discover_csindex(Session(), page_size=2)
 
     def test_cni_catalog_rejects_incomplete_pagination(self):
         first_page = {

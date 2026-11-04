@@ -38,7 +38,11 @@ RUN_DIAGNOSTIC_FIELDS = [
 def _read_csv(path: Path, fields: list[str]) -> list[dict[str, str]]:
     if not path.exists() or path.stat().st_size == 0:
         return []
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
+    if path.name.endswith(".gz"):
+        source = gzip.open(path, "rt", encoding="utf-8-sig", newline="")
+    else:
+        source = path.open("r", encoding="utf-8-sig", newline="")
+    with source as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames:
             return []
@@ -118,8 +122,16 @@ def _append_csv(path: Path, fields: list[str], rows: list[dict[str, Any]]) -> No
     if not rows:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    exists = path.exists() and path.stat().st_size > 0
-    with path.open("a", encoding="utf-8", newline="") as f:
+    if path.name.endswith(".gz"):
+        exists = False
+        if path.exists() and path.stat().st_size > 0:
+            with gzip.open(path, "rt", encoding="utf-8-sig", newline="") as prior:
+                exists = bool(prior.readline())
+        destination = gzip.open(path, "at", encoding="utf-8", newline="")
+    else:
+        exists = path.exists() and path.stat().st_size > 0
+        destination = path.open("a", encoding="utf-8", newline="")
+    with destination as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         if not exists:
             writer.writeheader()
@@ -256,7 +268,14 @@ def persist_results(
 
     latest_path = root / "latest_state.json"
     latest_state = json.loads(latest_path.read_text(encoding="utf-8")) if latest_path.exists() else {}
-    prior_events = _read_csv(root / "membership_events.csv", EVENT_FIELDS)
+    event_csv = root / "membership_events.csv"
+    event_gzip = root / "membership_events.csv.gz"
+    prior_events = [
+        row
+        for path in (event_csv, event_gzip)
+        for row in _read_csv(path, EVENT_FIELDS)
+    ]
+    event_path = event_gzip if event_gzip.exists() else event_csv
     known_event_ids = {row["event_id"] for row in prior_events}
     observations = _read_csv(root / "observations.csv", OBSERVATION_FIELDS)
     known_observation_keys = {(row["run_id"], row["provider"], row["index_code"]) for row in observations}
@@ -377,7 +396,7 @@ def persist_results(
             known_observation_keys.add(obs_key)
 
     _append_csv(root / "observations.csv", OBSERVATION_FIELDS, new_observations)
-    _append_csv(root / "membership_events.csv", EVENT_FIELDS, new_events)
+    _append_csv(event_path, EVENT_FIELDS, new_events)
     latest_path.write_text(json.dumps(latest_state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     if catalog_errors:

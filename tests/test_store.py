@@ -1,4 +1,5 @@
 import csv
+import gzip
 import json
 import tempfile
 import unittest
@@ -39,6 +40,44 @@ class StoreTests(unittest.TestCase):
                 events = list(csv.DictReader(f))
             actions = {(row["effective_date"], row["security_code"]): row["action"] for row in events}
             self.assertEqual(actions[("2026-10-30", "000001")], "BASELINE")
+            self.assertEqual(actions[("2026-11-02", "300750")], "ADD")
+            self.assertEqual(actions[("2026-11-02", "000001")], "REMOVE")
+
+    def test_existing_gzip_event_ledger_is_read_deduplicated_and_appended(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_snapshot = self._snapshot("2026-10-30", ["600000", "000001"], "hash1")
+            first = FetchResult(self.ref, "ok", [first_snapshot], "CSINDEX_OFFICIAL_FILE",
+                                first_snapshot.source_url, "hash1")
+            persist_results(root, [self.ref], [first], "2026-10-30T08:30:00+00:00", "run1")
+
+            plain_path = root / "membership_events.csv"
+            gzip_path = root / "membership_events.csv.gz"
+            gzip_path.write_bytes(gzip.compress(plain_path.read_bytes(), mtime=0))
+            plain_path.unlink()
+            compressed_before = gzip_path.read_bytes()
+            (root / "latest_state.json").unlink()
+
+            replay = persist_results(
+                root, [self.ref], [first], "2026-10-31T08:30:00+00:00", "run2"
+            )
+            self.assertEqual(replay["new_events"], 0)
+            self.assertEqual(gzip_path.read_bytes(), compressed_before)
+
+            second_snapshot = self._snapshot("2026-11-02", ["600000", "300750"], "hash2")
+            second = FetchResult(self.ref, "ok", [second_snapshot], "CSINDEX_OFFICIAL_FILE",
+                                 second_snapshot.source_url, "hash2")
+            summary = persist_results(
+                root, [self.ref], [second], "2026-11-02T08:30:00+00:00", "run3"
+            )
+            self.assertEqual(summary["new_events"], 2)
+            self.assertFalse(plain_path.exists())
+            self.assertTrue(gzip_path.read_bytes().startswith(compressed_before))
+            with gzip.open(gzip_path, "rt", encoding="utf-8", newline="") as f:
+                events = list(csv.DictReader(f))
+            self.assertEqual(len(events), 4)
+            self.assertEqual(len({row["event_id"] for row in events}), 4)
+            actions = {(row["effective_date"], row["security_code"]): row["action"] for row in events}
             self.assertEqual(actions[("2026-11-02", "300750")], "ADD")
             self.assertEqual(actions[("2026-11-02", "000001")], "REMOVE")
 

@@ -186,8 +186,9 @@ def discover_csindex(session: requests.Session, page_size: int = 200) -> list[In
     results: list[IndexRef] = []
     for series_id, family_name in families.items():
         page_num = 1
-        total = None
+        total: int | None = None
         received = 0
+        seen_page_signatures: set[tuple[str, ...]] = set()
         while total is None or (page_num - 1) * page_size < total:
             body = {
                 "sorter": {"sortField": "null", "sortOrder": None},
@@ -227,7 +228,18 @@ def discover_csindex(session: requests.Session, page_size: int = 200) -> list[In
             if not isinstance(rows, list):
                 raise ValueError(f"unexpected CSI catalog page type: {type(rows).__name__}")
             if total is None:
-                total = int(payload.get("total") or 0)
+                reported_total = payload.get("total")
+                if reported_total is not None and str(reported_total).strip():
+                    parsed_total = int(reported_total)
+                    if parsed_total > 0:
+                        total = parsed_total
+                if total is None and rows:
+                    page_signature = tuple(_text(row.get("indexCode")) for row in rows)
+                    if page_signature in seen_page_signatures:
+                        raise ValueError(
+                            f"CSI catalog series {series_id} repeated a page without a usable total"
+                        )
+                    seen_page_signatures.add(page_signature)
             received += len(rows)
             for row in rows:
                 code = _code(row.get("indexCode"))
@@ -252,11 +264,11 @@ def discover_csindex(session: requests.Session, page_size: int = 200) -> list[In
                     **classification,
                 ))
             if not rows:
-                if received < total:
+                if total is not None and received < total:
                     raise ValueError(f"CSI catalog series {series_id} ended at {received} of {total} rows")
                 break
             if len(rows) < page_size:
-                if received < total:
+                if total is not None and received < total:
                     raise ValueError(f"CSI catalog series {series_id} is incomplete: received {received} of {total} rows")
                 break
             page_num += 1
@@ -450,11 +462,14 @@ def fetch_eastmoney_current(session: requests.Session, index: IndexRef) -> Fetch
         return FetchResult(index, "no_data", source_provider="EASTMONEY_SECONDARY",
                            source_url=EASTMONEY_URL, source_sha256=digest,
                            message=str(payload.get("message") or "empty result")[:300])
-    dates = {_date(item.get("TRADE_DATE")) for item in data}
+    dated_items = [(item, _date(item.get("TRADE_DATE"))) for item in data]
+    dates = {source_date for _, source_date in dated_items}
     dates.discard("")
     source_date = max(dates) if dates else ""
     members = []
-    for item in data:
+    for item, item_date in dated_items:
+        if source_date and item_date != source_date:
+            continue
         code = _code(item.get("SECURITY_CODE"))
         if not code:
             continue
