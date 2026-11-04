@@ -30,7 +30,7 @@ python scripts/collect.py --data-dir ./data --limit 5 --dry-run
 
 ## 数据模型
 
-- `data/index_catalog.csv`：发现到的指数代码、名称、编制方/目录来源和候选范围。
+- `data/index_catalog.csv`：发现到的指数代码、名称、编制方/目录来源、候选范围，以及原生分类和规范化分类标签。
 - `data/catalog_errors.csv`：目录来源不可用或目录发现失败时的来源级错误。
 - `data/collection_runs.csv`：每次运行的成功/失败计数、目录完整性和运行状态。
 - `data/observations.csv`：每次按指数的观测、来源日期、数量、状态与 SHA-256。

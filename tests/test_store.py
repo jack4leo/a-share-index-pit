@@ -1,10 +1,11 @@
 import csv
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from a_share_index_pit.models import FetchResult, IndexRef, Snapshot
-from a_share_index_pit.store import persist_results
+from a_share_index_pit.store import load_catalog_refs, persist_results
 
 
 class StoreTests(unittest.TestCase):
@@ -160,6 +161,58 @@ class StoreTests(unittest.TestCase):
                 runs = list(csv.DictReader(f))
             self.assertEqual(runs[-1]["catalog_complete"], "false")
             self.assertEqual(runs[-1]["status"], "partial_catalog")
+
+    def test_catalog_classification_round_trips_as_native_json_and_independent_tags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            classified = IndexRef(
+                "CSI", "000300", "沪深300", "https://example.test/catalog", "CSINDEX_OFFICIAL_CATALOG",
+                source_classification=json.dumps({"indexClassify": "规模", "assetsClassify": "股票"}, ensure_ascii=False),
+                primary_category="market_size",
+                universe_scope_tags=("equity",),
+                geography_region_tags=("china_mainland",),
+                style_factor_tags=(),
+                strategy_tags=(),
+            )
+            persist_results(Path(tmp), [classified], [], "2026-11-04T08:00:00+00:00", "run1")
+
+            with (Path(tmp) / "index_catalog.csv").open(encoding="utf-8", newline="") as f:
+                row = next(csv.DictReader(f))
+            self.assertEqual(json.loads(row["source_classification"])["indexClassify"], "规模")
+            self.assertEqual(row["primary_category"], "market_size")
+            self.assertEqual(json.loads(row["universe_scope_tags"]), ["equity"])
+            self.assertEqual(json.loads(row["geography_region_tags"]), ["china_mainland"])
+
+            loaded = load_catalog_refs(tmp)[0]
+            self.assertEqual(loaded.source_classification, classified.source_classification)
+            self.assertEqual(loaded.primary_category, "market_size")
+            self.assertEqual(loaded.universe_scope_tags, ("equity",))
+            self.assertEqual(loaded.geography_region_tags, ("china_mainland",))
+            self.assertEqual(loaded.style_factor_tags, ())
+            self.assertEqual(loaded.strategy_tags, ())
+
+    def test_legacy_cni_type_is_migrated_but_unrecognized_legacy_csi_class_stays_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "index_catalog.csv"
+            with path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=[
+                    "provider", "index_code", "index_name", "catalog_url", "source_provider", "candidate_scope", "note",
+                ])
+                writer.writeheader()
+                writer.writerow({
+                    "provider": "CNI", "index_code": "399001", "index_name": "深证成指",
+                    "catalog_url": "https://example.test", "source_provider": "CNI_OFFICIAL_CATALOG",
+                    "note": "official_visible=1; index_type=100; catalog_sample_size=500",
+                })
+                writer.writerow({
+                    "provider": "CSI", "index_code": "000300", "index_name": "沪深300",
+                    "catalog_url": "https://example.test", "source_provider": "CSINDEX_OFFICIAL_CATALOG",
+                    "note": "series=1; asset_class=股票; region=境内",
+                })
+
+            refs = {ref.provider: ref for ref in load_catalog_refs(tmp)}
+            self.assertEqual(refs["CNI"].primary_category, "market_size")
+            self.assertEqual(json.loads(refs["CNI"].source_classification)["indextype"], "100")
+            self.assertEqual(refs["CSI"].primary_category, "unknown")
 
 
 if __name__ == "__main__":

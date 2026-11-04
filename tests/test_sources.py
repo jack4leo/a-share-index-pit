@@ -4,11 +4,13 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from a_share_index_pit.classification import classify_cni, classify_csindex
 from a_share_index_pit.models import IndexRef
 from a_share_index_pit.sources import (
     _normalize_cni,
     _normalize_csindex,
     discover_cni,
+    discover_csindex,
     is_a_share_equity_code,
 )
 
@@ -71,6 +73,70 @@ class SourceNormalizationTests(unittest.TestCase):
         self.assertEqual(ref_980.source_provider, "CNI_OFFICIAL_CATALOG")
         self.assertIn("index_type=200", ref_980.note)
         self.assertIn("catalog_sample_size=100", ref_980.note)
+        self.assertEqual(json.loads(ref_980.source_classification)["indextype"], "200")
+        self.assertEqual(ref_980.primary_category, "market_size")
+        self.assertEqual(ref_980.universe_scope_tags, ("equity",))
+
+    def test_cni_strategy_code_maps_to_strategy_dimension_and_unknown_code_stays_unknown(self):
+        strategy = classify_cni("104")
+        self.assertEqual(strategy["primary_category"], "strategy")
+        self.assertEqual(strategy["strategy_tags"], ("strategy",))
+        self.assertEqual(strategy["universe_scope_tags"], ("equity",))
+
+        unsupported = classify_cni("999")
+        self.assertEqual(unsupported["primary_category"], "unknown")
+        self.assertEqual(json.loads(unsupported["source_classification"])["indextype"], "999")
+
+        missing = classify_cni("")
+        self.assertEqual(missing["primary_category"], "unknown")
+        self.assertEqual(missing["source_classification"], "")
+
+    def test_csindex_native_fields_map_only_publisher_supplied_values(self):
+        classification = classify_csindex({
+            "indexClassify": "行业",
+            "indexClassifyEn": "Sector",
+            "assetsClassify": "股票",
+            "assetsClassifyEn": "Equity",
+            "region": "境内",
+            "regionEn": "China Mainland",
+        })
+        self.assertEqual(classification["primary_category"], "sector_industry")
+        self.assertEqual(classification["universe_scope_tags"], ("equity",))
+        self.assertEqual(classification["geography_region_tags"], ("china_mainland",))
+        self.assertEqual(json.loads(classification["source_classification"])["indexClassify"], "行业")
+
+        unsupported = classify_csindex({"indexClassify": "新分类", "indexName": "主题名称"})
+        self.assertEqual(unsupported["primary_category"], "unknown")
+        self.assertEqual(json.loads(unsupported["source_classification"])["indexClassify"], "新分类")
+
+    def test_csindex_catalog_discovery_persists_native_classification(self):
+        row = {
+            "indexCode": "000300", "indexName": "沪深300", "assetsClassify": "股票",
+            "assetsClassifyEn": "Equity", "region": "境内", "regionEn": "China Mainland",
+            "indexClassify": "规模", "indexClassifyEn": "Size",
+        }
+
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        class Session:
+            def post(self, _url, json, **_kwargs):
+                series = json["indexFilter"]["indexSeries"][0]
+                return Response({"code": "200", "total": 1 if series == "1" else 0,
+                                 "data": [row] if series == "1" else []})
+
+        refs = discover_csindex(Session(), page_size=10)
+        ref = next(item for item in refs if item.code == "000300")
+        self.assertEqual(ref.primary_category, "market_size")
+        self.assertEqual(ref.universe_scope_tags, ("equity",))
+        self.assertEqual(json.loads(ref.source_classification)["indexClassifyEn"], "Size")
 
     def test_cni_catalog_rejects_incomplete_pagination(self):
         first_page = {

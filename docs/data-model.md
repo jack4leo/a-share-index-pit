@@ -16,6 +16,16 @@
 
 只有官方目录发现完整时才更新候选清单。若任一目录来源不可用，`index_catalog.csv` 保持上次完整版本；采集器会将该来源上次的候选项与本次可用来源的结果合并后继续抓取。`candidate_scope` 初始为 `candidate_pending_sample_validation`，不代表已经完整确认属于 A 股权益指数。
 
+目录同时保存发布方原生分类和规范化的多维分类：
+
+- `source_classification`：JSON 对象，原样保留目录分类字段。CNI 保存 `indextype` 代码及官网类型标签；CSI 保存 `indexClassify`、`assetsClassify`、`region` 等可用原生字段。规范化不会覆盖或替代原值。
+- `primary_category`：单一规范主类别，可能值包括 `market_size`、`sector_industry`、`style_factor`、`thematic`、`strategy`、`composite`、`fixed_income`、`fund`、`customized`、`currency`、`cross_border`、`multi_asset`、`other` 和 `unknown`。
+- `universe_scope_tags`、`geography_region_tags`、`style_factor_tags`、`strategy_tags`：独立维度的 JSON 字符串数组，不与主类别互斥。例如一个风格指数可以同时有 `primary_category=style_factor`、`universe_scope_tags=["equity"]` 和 `style_factor_tags=["style"]`。`unknown` 表示来源缺少或暂不支持该维度；空数组表示没有可附加的风格/策略标签。
+
+CSI 的主类别映射依据官方目录 `indexClassify`：规模→`market_size`、行业→`sector_industry`、风格→`style_factor`、主题→`thematic`、策略→`strategy`、综合→`composite`；信用债、利率债和可转债归为 `fixed_income`。`assetsClassify` 用于 universe/scope 标签，`region` 用于地域标签（如境内→`china_mainland`、沪深港→`china_mainland_hong_kong`）。
+
+CNI 使用官网指数系列菜单的 `indextype` 类型码：100/200 规模、101/201 行业、102/202 风格、103/203 主题、104/204 策略、105/205 综合、106/206 债券、107/207 基金、108/208 定制、111/211 多资产、199/299 其他；209 人民币指数映射为 `currency`，210 跨境指数映射为 `cross_border`。前述股票分类只生成宽泛的 `equity` universe 标签，不声称一定是 A 股；210 只标记跨境地域，不推断其资产类别。其他发布方系列类型或未来新增代码保留在 `source_classification` 中，并将 `primary_category` 设为 `unknown`，不根据指数名称猜测。类型名称依据[国证官网指数系列](https://www.cnindex.com.cn/module/index-series.html?act_menu=1&index_type=-1)的官方菜单；CSI 原生字段来自[中证官网指数浏览器](https://www.csindex.com.cn/zh-CN/indices/family/list)。
+
 ### `observations.csv`
 
 按 `run_id + provider + index_code` 记录一次采集结果。状态包括 `ok`、`ok_secondary`、`fetch_failed`、`empty_source`、`partial_non_a_members`、`stale_snapshot` 等。发生来源日期回退时，仍保留该快照的 `source_asof` 和本次 `observed_at`，但不更新最新状态或产生事件。错误和空结果始终与“没有成分变化”区分开。

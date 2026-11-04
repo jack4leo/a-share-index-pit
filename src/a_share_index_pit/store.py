@@ -9,11 +9,16 @@ from typing import Any
 
 import pandas as pd
 
+from .classification import classify_cni
 from .models import FetchResult, IndexRef, Snapshot
 from .sources import is_a_share_equity_code
 
 PARSER_VERSION = "0.1.0"
-CATALOG_FIELDS = ["provider", "index_code", "index_name", "catalog_url", "source_provider", "candidate_scope", "note"]
+CATALOG_FIELDS = [
+    "provider", "index_code", "index_name", "catalog_url", "source_provider", "candidate_scope", "note",
+    "source_classification", "primary_category", "universe_scope_tags", "geography_region_tags",
+    "style_factor_tags", "strategy_tags",
+]
 OBSERVATION_FIELDS = [
     "run_id", "observed_at", "provider", "index_code", "index_name", "source_status",
     "source_provider", "source_asof", "member_count", "membership_hash", "source_sha256",
@@ -40,21 +45,64 @@ def _read_csv(path: Path, fields: list[str]) -> list[dict[str, str]]:
         return [{field: row.get(field, "") or "" for field in fields} for row in reader]
 
 
+def _catalog_tags(value: str, *, empty_is_unknown: bool = True) -> tuple[str, ...]:
+    if not value:
+        return ("unknown",)
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return ("unknown",)
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        return ("unknown",)
+    if not parsed and empty_is_unknown:
+        return ("unknown",)
+    return tuple(parsed)
+
+
 def load_catalog_refs(data_dir: str | Path) -> list[IndexRef]:
     """Load the last persisted complete candidate catalog, if present."""
     rows = _read_csv(Path(data_dir) / "index_catalog.csv", CATALOG_FIELDS)
-    return [
-        IndexRef(
+    refs = []
+    for row in rows:
+        source_classification = row["source_classification"]
+        primary_category = row["primary_category"] or "unknown"
+        universe_scope_tags = _catalog_tags(row["universe_scope_tags"])
+        geography_region_tags = _catalog_tags(row["geography_region_tags"])
+        style_factor_tags = _catalog_tags(row["style_factor_tags"], empty_is_unknown=False) if row["style_factor_tags"] else ()
+        strategy_tags = _catalog_tags(row["strategy_tags"], empty_is_unknown=False) if row["strategy_tags"] else ()
+
+        # Older catalogs kept CNI's official indextype only in free-text note.
+        # Recover that explicit native value without attempting any name-based inference.
+        if not source_classification and row["provider"] == "CNI" and row["source_provider"] == "CNI_OFFICIAL_CATALOG":
+            for part in row["note"].split(";"):
+                if part.strip().startswith("index_type="):
+                    legacy_type = part.strip().split("=", 1)[1]
+                    if not legacy_type or legacy_type == "unknown":
+                        break
+                    migrated = classify_cni(legacy_type)
+                    source_classification = migrated["source_classification"]
+                    primary_category = migrated["primary_category"]
+                    universe_scope_tags = migrated["universe_scope_tags"]
+                    geography_region_tags = migrated["geography_region_tags"]
+                    style_factor_tags = migrated["style_factor_tags"]
+                    strategy_tags = migrated["strategy_tags"]
+                    break
+
+        refs.append(IndexRef(
             provider=row["provider"],
             code=row["index_code"],
             name=row["index_name"],
             catalog_url=row["catalog_url"],
             source_provider=row["source_provider"],
             note=row["note"],
-        )
-        for row in rows
-        if row["provider"] and row["index_code"] and row["index_name"]
-    ]
+            source_classification=source_classification,
+            primary_category=primary_category,
+            universe_scope_tags=universe_scope_tags,
+            geography_region_tags=geography_region_tags,
+            style_factor_tags=style_factor_tags,
+            strategy_tags=strategy_tags,
+        ))
+    return [ref for ref in refs if ref.provider and ref.code and ref.name]
 
 
 def _write_csv(path: Path, fields: list[str], rows: list[dict[str, Any]]) -> None:
@@ -196,6 +244,12 @@ def persist_results(
         "provider": ref.provider, "index_code": ref.code, "index_name": ref.name,
         "catalog_url": ref.catalog_url, "source_provider": ref.source_provider,
         "candidate_scope": "candidate_pending_sample_validation", "note": ref.note,
+        "source_classification": ref.source_classification,
+        "primary_category": ref.primary_category,
+        "universe_scope_tags": json.dumps(ref.universe_scope_tags, ensure_ascii=False),
+        "geography_region_tags": json.dumps(ref.geography_region_tags, ensure_ascii=False),
+        "style_factor_tags": json.dumps(ref.style_factor_tags, ensure_ascii=False),
+        "strategy_tags": json.dumps(ref.strategy_tags, ensure_ascii=False),
     } for ref in (catalog_refs if catalog_refs is not None else refs)]
     if catalog_complete:
         _write_csv(root / "index_catalog.csv", CATALOG_FIELDS, catalog_rows)

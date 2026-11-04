@@ -14,6 +14,14 @@ class IndexRef:
     catalog_url: str
     source_provider: str
     note: str = ""
+    # JSON object of publisher-native classification fields, kept separately from
+    # the normalized, language-neutral taxonomy below.
+    source_classification: str = ""
+    primary_category: str = "unknown"
+    universe_scope_tags: tuple[str, ...] = ("unknown",)
+    geography_region_tags: tuple[str, ...] = ("unknown",)
+    style_factor_tags: tuple[str, ...] = ()
+    strategy_tags: tuple[str, ...] = ()
 
     @property
     def key(self) -> str:

@@ -11,6 +11,7 @@ from typing import Any
 import pandas as pd
 import requests
 
+from .classification import classify_cni, classify_csindex
 from .models import FetchResult, IndexRef, Snapshot
 
 CNI_CATALOG_URL = "https://www.cnindex.com.cn/index/indexList"
@@ -148,8 +149,9 @@ def discover_cni(session: requests.Session) -> list[IndexRef]:
             if not visible or not re.fullmatch(r"[A-Z0-9]{1,16}", code) or not name:
                 continue
             sample_size = pd.to_numeric(row.get("samplesize"), errors="coerce")
-            index_type = _text(row.get("indextype")) or "unknown"
-            note = f"official_visible=1; index_type={index_type}; catalog_sample_size=" + (
+            index_type = _text(row.get("indextype"))
+            classification = classify_cni(index_type)
+            note = f"official_visible=1; index_type={index_type or 'unknown'}; catalog_sample_size=" + (
                 "unknown" if pd.isna(sample_size) else str(int(sample_size))
             )
             results.append(
@@ -160,6 +162,7 @@ def discover_cni(session: requests.Session) -> list[IndexRef]:
                     catalog_url=catalog_url,
                     source_provider="CNI_OFFICIAL_CATALOG",
                     note=note,
+                    **classification,
                 )
             )
         received += len(rows)
@@ -235,6 +238,7 @@ def discover_csindex(session: requests.Session, page_size: int = 200) -> list[In
                     continue
                 if asset_class not in ("股票", "Equity") or region not in ("境内", "China Mainland"):
                     continue
+                classification = classify_csindex(row)
                 # 399xxx codes can also appear in CSI's cross-publisher directory;
                 # normalize them to the CNI publisher namespace.
                 publisher = "CNI" if code.startswith("399") else ("BSE" if code.startswith("899") else family_name)
@@ -245,6 +249,7 @@ def discover_csindex(session: requests.Session, page_size: int = 200) -> list[In
                     catalog_url="https://www.csindex.com.cn/zh-CN/indices/family/list",
                     source_provider="CSINDEX_OFFICIAL_CATALOG",
                     note=f"series={series_id}; asset_class={asset_class}; region={region}",
+                    **classification,
                 ))
             if not rows:
                 if received < total:
