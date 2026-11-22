@@ -47,8 +47,10 @@ def collect(data_dir: str, limit: int | None = None, workers: int = 4,
     previous_catalog = load_catalog_refs(data_dir)
     discovered_refs, catalog_errors = discover_indexes(make_session())
     catalog_complete = bool(discovered_refs) and not catalog_errors
-    refs = _merge_incomplete_catalog(discovered_refs, previous_catalog, catalog_errors)
+    catalog_candidates = _merge_incomplete_catalog(discovered_refs, previous_catalog, catalog_errors)
     catalog_refs = discovered_refs
+    out_of_scope_skipped = sum(ref.eligibility_status == "out_of_scope" for ref in catalog_candidates)
+    refs = [ref for ref in catalog_candidates if ref.eligibility_status != "out_of_scope"]
     if limit is not None:
         refs = refs[:limit]
 
@@ -71,6 +73,7 @@ def collect(data_dir: str, limit: int | None = None, workers: int = 4,
             "failed": sum(not result.status.startswith("ok") for result in results),
             "catalog_errors": len(catalog_errors),
             "catalog_complete": catalog_complete,
+            "out_of_scope_skipped": out_of_scope_skipped,
             "new_observations": 0,
             "new_events": 0,
             "dry_run": True,
@@ -83,9 +86,12 @@ def collect(data_dir: str, limit: int | None = None, workers: int = 4,
     successful = sum(result.status.startswith("ok") for result in results)
     failed = len(results) - successful
 
-    if not refs:
+    if not catalog_candidates:
         run_status = "failed_no_candidates"
         run_message = "No current or cached index candidates; catalog errors are recorded separately."
+    elif not refs:
+        run_status = "completed"
+        run_message = f"No collection-eligible candidates; skipped {out_of_scope_skipped} confirmed non-stock indexes."
     elif successful == 0:
         run_status = "failed_all_fetches"
         run_message = f"All {len(refs)} index fetches failed."
@@ -98,6 +104,9 @@ def collect(data_dir: str, limit: int | None = None, workers: int = 4,
     else:
         run_status = "completed"
         run_message = ""
+    if refs and out_of_scope_skipped:
+        skipped_note = f"Skipped {out_of_scope_skipped} confirmed non-stock indexes."
+        run_message = (run_message + " " if run_message else "") + skipped_note
 
     summary = persist_results(
         data_dir,
@@ -110,18 +119,19 @@ def collect(data_dir: str, limit: int | None = None, workers: int = 4,
         catalog_refs=catalog_refs,
         run_status=run_status,
         run_message=run_message,
+        out_of_scope_skipped=out_of_scope_skipped,
     )
     summary["catalog_complete"] = int(catalog_complete)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
-    if not refs:
+    if not catalog_candidates:
         diagnostics = ["collection_runs.csv"]
         if catalog_errors:
             diagnostics.append("catalog_errors.csv")
         raise RuntimeError(
             f"no index candidates discovered; diagnostics saved under {data_dir}/" + ", ".join(diagnostics)
         )
-    if successful == 0:
+    if refs and successful == 0:
         diagnostics = ["observations.csv", "collection_runs.csv"]
         if catalog_errors:
             diagnostics.append("catalog_errors.csv")

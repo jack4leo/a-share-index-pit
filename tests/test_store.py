@@ -228,6 +228,84 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(loaded.geography_region_tags, ("china_mainland",))
             self.assertEqual(loaded.style_factor_tags, ())
             self.assertEqual(loaded.strategy_tags, ())
+            self.assertEqual(loaded.eligibility_status, "unknown")
+
+    def test_catalog_round_trips_eligibility_evidence_separately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            classified = IndexRef(
+                "CSI", "000300", "沪深300", "https://example.test/catalog", "CSINDEX_OFFICIAL_CATALOG",
+                source_classification=json.dumps({
+                    "indexClassify": "策略", "assetsClassify": "股票", "region": "境内",
+                }, ensure_ascii=False),
+                primary_category="strategy", universe_scope_tags=("equity",),
+                eligibility_status="in_scope", eligibility_reason="native equity and mainland fields",
+                eligibility_source="CSINDEX_OFFICIAL_CATALOG.assetsClassify+region",
+                eligibility_evidence='{"assetsClassify":"股票","region":"境内"}',
+            )
+            persist_results(Path(tmp), [classified], [], "2026-11-04T08:00:00+00:00", "run1")
+            loaded = load_catalog_refs(tmp)[0]
+            self.assertEqual(loaded.primary_category, "strategy")
+            self.assertEqual(loaded.eligibility_status, "in_scope")
+            self.assertEqual(loaded.eligibility_reason, "native equity and mainland fields")
+            self.assertEqual(loaded.eligibility_source, "CSINDEX_OFFICIAL_CATALOG.assetsClassify+region")
+            self.assertEqual(json.loads(loaded.eligibility_evidence), {
+                "assetsClassify": "股票", "region": "境内",
+            })
+
+    def test_legacy_discontinued_csi_equity_rows_migrate_as_in_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "index_catalog.csv"
+            with path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=[
+                    "provider", "index_code", "index_name", "catalog_url", "source_provider",
+                    "candidate_scope", "note", "source_classification", "primary_category",
+                    "universe_scope_tags", "geography_region_tags", "style_factor_tags", "strategy_tags",
+                ])
+                writer.writeheader()
+                for code, name in (("931176", "台州综指"), ("931179", "台州制造30")):
+                    writer.writerow({
+                        "provider": "CSI", "index_code": code, "index_name": name,
+                        "catalog_url": "https://www.csindex.com.cn/zh-CN/indices/family/list",
+                        "source_provider": "CSINDEX_OFFICIAL_CATALOG", "note": "",
+                        "source_classification": json.dumps({
+                            "assetsClassify": "股票", "assetsClassifyEn": "Equity",
+                            "region": "境内", "regionEn": "China Mainland",
+                            "indexClassify": "主题",
+                        }, ensure_ascii=False),
+                    })
+
+            refs = {ref.code: ref for ref in load_catalog_refs(tmp)}
+            self.assertEqual(set(refs), {"931176", "931179"})
+            for ref in refs.values():
+                self.assertEqual(ref.eligibility_status, "in_scope")
+                self.assertNotIn("discontinu", ref.eligibility_reason.casefold())
+
+    def test_collection_run_schema_extension_preserves_historic_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collection_runs.csv"
+            with path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=[
+                    "run_id", "observed_at", "indexes", "successful", "failed", "catalog_errors",
+                    "catalog_complete", "status", "message",
+                ])
+                writer.writeheader()
+                writer.writerow({
+                    "run_id": "historic", "observed_at": "2026-11-01T08:00:00+00:00",
+                    "indexes": "10", "successful": "9", "failed": "1", "catalog_errors": "0",
+                    "catalog_complete": "true", "status": "partial_fetches", "message": "old failure",
+                })
+
+            persist_results(
+                Path(tmp), [self.ref], [], "2026-11-02T08:00:00+00:00", "new-run",
+                out_of_scope_skipped=2,
+            )
+            with path.open(encoding="utf-8", newline="") as f:
+                rows = list(csv.DictReader(f))
+            self.assertEqual(rows[0]["run_id"], "historic")
+            self.assertEqual(rows[0]["message"], "old failure")
+            self.assertEqual(rows[0]["out_of_scope_skipped"], "")
+            self.assertEqual(rows[1]["run_id"], "new-run")
+            self.assertEqual(rows[1]["out_of_scope_skipped"], "2")
 
     def test_legacy_cni_type_is_migrated_but_unrecognized_legacy_csi_class_stays_unknown(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -251,7 +329,32 @@ class StoreTests(unittest.TestCase):
             refs = {ref.provider: ref for ref in load_catalog_refs(tmp)}
             self.assertEqual(refs["CNI"].primary_category, "market_size")
             self.assertEqual(json.loads(refs["CNI"].source_classification)["indextype"], "100")
+            self.assertEqual(refs["CNI"].eligibility_status, "in_scope")
             self.assertEqual(refs["CSI"].primary_category, "unknown")
+            self.assertEqual(refs["CSI"].eligibility_status, "unknown")
+
+    def test_legacy_cn6109_migrates_from_exact_code_and_official_methodology(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "index_catalog.csv"
+            with path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=[
+                    "provider", "index_code", "index_name", "catalog_url", "source_provider", "note",
+                ])
+                writer.writeheader()
+                writer.writerow({
+                    "provider": "CNI", "index_code": "CN6109", "index_name": "名称不用于资格判断",
+                    "catalog_url": "https://www.cnindex.com.cn/zh_indices/sese/customized/index.html",
+                    "source_provider": "CNI_OFFICIAL_CATALOG",
+                    "note": "official_visible=1; index_type=108; catalog_sample_size=100",
+                })
+
+            ref = load_catalog_refs(tmp)[0]
+            self.assertEqual(ref.eligibility_status, "in_scope")
+            self.assertEqual(
+                ref.eligibility_source,
+                "CNI_OFFICIAL_CATALOG.asset_class+coverage_scope+CNINDEX_METHODOLOGY",
+            )
+            self.assertIn("gz_399625.pdf", ref.eligibility_evidence)
 
 
 if __name__ == "__main__":

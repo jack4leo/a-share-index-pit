@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 
 from .classification import classify_cni
+from .eligibility import ELIGIBILITY_STATUSES, assess_cni, assess_csindex, unknown_eligibility
 from .models import FetchResult, IndexRef, Snapshot
 from .sources import is_a_share_equity_code
 
@@ -17,7 +18,8 @@ PARSER_VERSION = "0.1.0"
 CATALOG_FIELDS = [
     "provider", "index_code", "index_name", "catalog_url", "source_provider", "candidate_scope", "note",
     "source_classification", "primary_category", "universe_scope_tags", "geography_region_tags",
-    "style_factor_tags", "strategy_tags",
+    "style_factor_tags", "strategy_tags", "eligibility_status", "eligibility_reason",
+    "eligibility_source", "eligibility_evidence",
 ]
 OBSERVATION_FIELDS = [
     "run_id", "observed_at", "provider", "index_code", "index_name", "source_status",
@@ -31,7 +33,7 @@ EVENT_FIELDS = [
 ]
 RUN_DIAGNOSTIC_FIELDS = [
     "run_id", "observed_at", "indexes", "successful", "failed", "catalog_errors",
-    "catalog_complete", "status", "message",
+    "catalog_complete", "status", "message", "out_of_scope_skipped",
 ]
 
 
@@ -63,12 +65,21 @@ def _catalog_tags(value: str, *, empty_is_unknown: bool = True) -> tuple[str, ..
     return tuple(parsed)
 
 
+def _native_fields(value: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def load_catalog_refs(data_dir: str | Path) -> list[IndexRef]:
     """Load the last persisted complete candidate catalog, if present."""
     rows = _read_csv(Path(data_dir) / "index_catalog.csv", CATALOG_FIELDS)
     refs = []
     for row in rows:
         source_classification = row["source_classification"]
+        native = _native_fields(source_classification)
         primary_category = row["primary_category"] or "unknown"
         universe_scope_tags = _catalog_tags(row["universe_scope_tags"])
         geography_region_tags = _catalog_tags(row["geography_region_tags"])
@@ -77,20 +88,41 @@ def load_catalog_refs(data_dir: str | Path) -> list[IndexRef]:
 
         # Older catalogs kept CNI's official indextype only in free-text note.
         # Recover that explicit native value without attempting any name-based inference.
-        if not source_classification and row["provider"] == "CNI" and row["source_provider"] == "CNI_OFFICIAL_CATALOG":
+        legacy_type = ""
+        if row["provider"] == "CNI" and row["source_provider"] == "CNI_OFFICIAL_CATALOG":
             for part in row["note"].split(";"):
                 if part.strip().startswith("index_type="):
                     legacy_type = part.strip().split("=", 1)[1]
                     if not legacy_type or legacy_type == "unknown":
                         break
-                    migrated = classify_cni(legacy_type)
-                    source_classification = migrated["source_classification"]
-                    primary_category = migrated["primary_category"]
-                    universe_scope_tags = migrated["universe_scope_tags"]
-                    geography_region_tags = migrated["geography_region_tags"]
-                    style_factor_tags = migrated["style_factor_tags"]
-                    strategy_tags = migrated["strategy_tags"]
+                    if not source_classification:
+                        migrated = classify_cni(legacy_type)
+                        source_classification = migrated["source_classification"]
+                        native = _native_fields(source_classification)
+                        primary_category = migrated["primary_category"]
+                        universe_scope_tags = migrated["universe_scope_tags"]
+                        geography_region_tags = migrated["geography_region_tags"]
+                        style_factor_tags = migrated["style_factor_tags"]
+                        strategy_tags = migrated["strategy_tags"]
                     break
+
+        eligibility_status = row.get("eligibility_status", "")
+        if eligibility_status not in ELIGIBILITY_STATUSES:
+            if row["source_provider"] == "CNI_OFFICIAL_CATALOG":
+                eligibility = assess_cni(native.get("indextype") or legacy_type,
+                                         source_provider=row["source_provider"],
+                                         index_code=row["index_code"])
+            elif row["source_provider"] == "CSINDEX_OFFICIAL_CATALOG":
+                eligibility = assess_csindex(native, source_provider=row["source_provider"])
+            else:
+                eligibility = unknown_eligibility(source_provider=row["source_provider"])
+        else:
+            eligibility = {
+                "eligibility_status": eligibility_status,
+                "eligibility_reason": row.get("eligibility_reason", ""),
+                "eligibility_source": row.get("eligibility_source", ""),
+                "eligibility_evidence": row.get("eligibility_evidence", "{}") or "{}",
+            }
 
         refs.append(IndexRef(
             provider=row["provider"],
@@ -105,6 +137,7 @@ def load_catalog_refs(data_dir: str | Path) -> list[IndexRef]:
             geography_region_tags=geography_region_tags,
             style_factor_tags=style_factor_tags,
             strategy_tags=strategy_tags,
+            **eligibility,
         ))
     return [ref for ref in refs if ref.provider and ref.code and ref.name]
 
@@ -122,11 +155,26 @@ def _append_csv(path: Path, fields: list[str], rows: list[dict[str, Any]]) -> No
     if not rows:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > 0 and not path.name.endswith(".gz"):
+        with path.open("r", encoding="utf-8-sig", newline="") as prior:
+            reader = csv.DictReader(prior)
+            old_fields = reader.fieldnames or []
+            if old_fields != fields:
+                retained_order = [field for field in fields if field in set(old_fields)]
+                if any(field not in fields for field in old_fields) or retained_order != old_fields:
+                    raise ValueError(f"cannot safely extend incompatible CSV schema: {path}")
+                old_rows = list(reader)
+                temporary = path.with_name(path.name + ".schema-migration.tmp")
+                _write_csv(temporary, fields, old_rows)
+                temporary.replace(path)
     if path.name.endswith(".gz"):
         exists = False
         if path.exists() and path.stat().st_size > 0:
             with gzip.open(path, "rt", encoding="utf-8-sig", newline="") as prior:
-                exists = bool(prior.readline())
+                old_header = next(csv.reader(prior), [])
+                if old_header != fields:
+                    raise ValueError(f"cannot safely extend compressed CSV schema: {path}")
+                exists = bool(old_header)
         destination = gzip.open(path, "at", encoding="utf-8", newline="")
     else:
         exists = path.exists() and path.stat().st_size > 0
@@ -248,6 +296,7 @@ def persist_results(
     catalog_refs: list[IndexRef] | None = None,
     run_status: str = "completed",
     run_message: str = "",
+    out_of_scope_skipped: int = 0,
 ) -> dict[str, int]:
     root = Path(data_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -262,6 +311,10 @@ def persist_results(
         "geography_region_tags": json.dumps(ref.geography_region_tags, ensure_ascii=False),
         "style_factor_tags": json.dumps(ref.style_factor_tags, ensure_ascii=False),
         "strategy_tags": json.dumps(ref.strategy_tags, ensure_ascii=False),
+        "eligibility_status": ref.eligibility_status,
+        "eligibility_reason": ref.eligibility_reason,
+        "eligibility_source": ref.eligibility_source,
+        "eligibility_evidence": ref.eligibility_evidence,
     } for ref in (catalog_refs if catalog_refs is not None else refs)]
     if catalog_complete:
         _write_csv(root / "index_catalog.csv", CATALOG_FIELDS, catalog_rows)
@@ -413,8 +466,10 @@ def persist_results(
         "catalog_complete": str(bool(catalog_complete)).lower(),
         "status": run_status,
         "message": run_message,
+        "out_of_scope_skipped": out_of_scope_skipped,
     }])
 
     return {"indexes": len(refs), "successful": success_count, "failed": failed_count,
             "new_observations": len(new_observations), "new_events": len(new_events),
+            "out_of_scope_skipped": out_of_scope_skipped,
             "catalog_errors": len(catalog_errors or [])}
