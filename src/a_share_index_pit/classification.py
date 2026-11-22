@@ -74,8 +74,8 @@ _CSI_CLASS_CATEGORIES = {
 
 _CSI_UNIVERSE = {
     "股票": "equity", "equity": "equity",
-    "固定收益": "fixed_income", "fixed income": "fixed_income",
-    "基金": "fund", "fund": "fund",
+    "债券": "fixed_income", "固定收益": "fixed_income", "bond": "fixed_income", "fixed income": "fixed_income",
+    "基金": "fund", "fund": "fund", "funds": "fund",
 }
 
 _CSI_GEOGRAPHY = {

@@ -12,6 +12,7 @@ import pandas as pd
 import requests
 
 from .classification import classify_cni, classify_csindex
+from .eligibility import assess_cni, assess_csindex
 from .models import FetchResult, IndexRef, Snapshot
 
 CNI_CATALOG_URL = "https://www.cnindex.com.cn/index/indexList"
@@ -151,6 +152,7 @@ def discover_cni(session: requests.Session) -> list[IndexRef]:
             sample_size = pd.to_numeric(row.get("samplesize"), errors="coerce")
             index_type = _text(row.get("indextype"))
             classification = classify_cni(index_type)
+            eligibility = assess_cni(index_type, index_code=code)
             note = f"official_visible=1; index_type={index_type or 'unknown'}; catalog_sample_size=" + (
                 "unknown" if pd.isna(sample_size) else str(int(sample_size))
             )
@@ -163,6 +165,7 @@ def discover_cni(session: requests.Session) -> list[IndexRef]:
                     source_provider="CNI_OFFICIAL_CATALOG",
                     note=note,
                     **classification,
+                    **eligibility,
                 )
             )
         received += len(rows)
@@ -176,7 +179,7 @@ def discover_cni(session: requests.Session) -> list[IndexRef]:
 
 
 def discover_csindex(session: requests.Session, page_size: int = 200) -> list[IndexRef]:
-    """Discover mainland equity indexes from CSI's official index explorer."""
+    """Discover every valid index in CSI's official series catalog for review."""
     families = {
         "1": "CSI",
         "2": "SSE",
@@ -248,9 +251,8 @@ def discover_csindex(session: requests.Session, page_size: int = 200) -> list[In
                 region = _text(row.get("region") or row.get("regionEn"))
                 if not code or not name or not re.fullmatch(r"\d{6}", code):
                     continue
-                if asset_class not in ("股票", "Equity") or region not in ("境内", "China Mainland"):
-                    continue
                 classification = classify_csindex(row)
+                eligibility = assess_csindex(row)
                 # 399xxx codes can also appear in CSI's cross-publisher directory;
                 # normalize them to the CNI publisher namespace.
                 publisher = "CNI" if code.startswith("399") else ("BSE" if code.startswith("899") else family_name)
@@ -262,6 +264,7 @@ def discover_csindex(session: requests.Session, page_size: int = 200) -> list[In
                     source_provider="CSINDEX_OFFICIAL_CATALOG",
                     note=f"series={series_id}; asset_class={asset_class}; region={region}",
                     **classification,
+                    **eligibility,
                 ))
             if not rows:
                 if total is not None and received < total:
@@ -274,7 +277,7 @@ def discover_csindex(session: requests.Session, page_size: int = 200) -> list[In
             page_num += 1
 
     if not results:
-        raise ValueError("CSI official catalog contained no eligible mainland equity indexes")
+        raise ValueError("CSI official catalog contained no valid indexes")
     return results
 
 
@@ -481,6 +484,12 @@ def fetch_eastmoney_current(session: requests.Session, index: IndexRef) -> Fetch
 
 def fetch_index(session: requests.Session, index: IndexRef, allow_secondary: bool = True) -> FetchResult:
     """Fetch the primary index-family source, then an explicitly labeled fallback."""
+    if index.eligibility_status == "out_of_scope":
+        return FetchResult(
+            index,
+            "out_of_scope_skipped",
+            message=index.eligibility_reason or "confirmed non-stock index; collection skipped",
+        )
     try:
         if index.provider == "CNI":
             primary = fetch_cni_sample_file(session, index)

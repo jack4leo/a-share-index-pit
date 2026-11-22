@@ -22,6 +22,11 @@ class IndexRef:
     geography_region_tags: tuple[str, ...] = ("unknown",)
     style_factor_tags: tuple[str, ...] = ()
     strategy_tags: tuple[str, ...] = ()
+    # Collection eligibility is separate from publisher taxonomy and tags.
+    eligibility_status: str = "unknown"
+    eligibility_reason: str = ""
+    eligibility_source: str = ""
+    eligibility_evidence: str = "{}"
 
     @property
     def key(self) -> str:

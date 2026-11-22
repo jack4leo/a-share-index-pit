@@ -26,6 +26,16 @@ CSI 的主类别映射依据官方目录 `indexClassify`：规模→`market_size
 
 CNI 使用官网指数系列菜单的 `indextype` 类型码：100/200 规模、101/201 行业、102/202 风格、103/203 主题、104/204 策略、105/205 综合、106/206 债券、107/207 基金、108/208 定制、111/211 多资产、199/299 其他；209 人民币指数映射为 `currency`，210 跨境指数映射为 `cross_border`。前述股票分类只生成宽泛的 `equity` universe 标签，不声称一定是 A 股；210 只标记跨境地域，不推断其资产类别。其他发布方系列类型或未来新增代码保留在 `source_classification` 中，并将 `primary_category` 设为 `unknown`，不根据指数名称猜测。类型名称依据[国证官网指数系列](https://www.cnindex.com.cn/module/index-series.html?act_menu=1&index_type=-1)的官方菜单；CSI 原生字段来自[中证官网指数浏览器](https://www.csindex.com.cn/zh-CN/indices/family/list)。
 
+### 独立采集资格
+
+`eligibility_status` 与 taxonomy 分开，取值为 `in_scope`、`out_of_scope`、`unknown`；`eligibility_reason` 解释规则，`eligibility_source` 指向提供依据的原生目录字段，`eligibility_evidence` 以 JSON 保留该字段的原值。实际目录 URL 仍记录在 `catalog_url`。旧的 `candidate_scope` 是兼容字段，不再作为抓取过滤条件。
+
+- CNI 官方 `indextype` 100–105、200–205 属于股票指数系列，标记为 `in_scope`，包括 104/204 策略指数。106/206（债券）、107/207（基金）、111/211（多资产）和 209（货币）是明确非股票类别，标记为 `out_of_scope`。108/208（定制）、210（跨境）、未识别类型、其他发布方系列及缺失类型通常均为 `unknown`。少数精确代码可由国证官方指数列表中的原生 `资产类别`、`覆盖范围` 字段进一步判定：CN5061 为股票/深市A股，CN6109 为股票/深市原中小板和创业板市场，均为 `in_scope`；CN6070–CN6072 是基金、CNB00013/14/15、CNB10013/14/15、CNB20013/14/15 是债券，可标记 `out_of_scope`；980025 原生字段为其它/其他，官方公告说明其测度北京股权交易中心市场发展而非股票样本，可标记 `out_of_scope`。CN5062 虽是股票，但覆盖范围包括 A 股和红筹企业存托凭证，因此保持 `unknown`，仍进入采集，不能误作非股票排除。[国证官方指数列表](https://www.cnindex.com.cn/index_1020/brochures_1593/201912/P020260929502519176457.xls) [980025 公告](https://www.cnindex.com.cn/zh_information/notices_news/2019/201912/t20191224_15556.html?act_menu=2) [中创100编制方案](https://www.cnindex.com.cn/docs/gz_399625.pdf)。这些精确例外不推广到其他定制指数；其他未知类型不能仅凭类别名、指数名称或代码排除。
+- CSI 只有当发布方的 `assetsClassify` 明确为股票，且 `region` 明确为境内时才标记为 `in_scope`；指数主类别为策略、风格或主题不改变这一结论。发布方资产类别明确为债券、基金、多资产、商品、货币等非股票时标记为 `out_of_scope`。股票类别但地域字段缺失、范围更广或值未识别时标记为 `unknown`，仍保留并采集，直到有更明确证据。
+- `out_of_scope` 才会阻止抓取并从整轮失败重试中排除。`in_scope` 和 `unknown` 均进入采集；目录始终保存全部有效发现项，以便检查资格判断。未知不等于非股票，采集失败、无数据或成分代码异常也不能单独把资格改成 `out_of_scope`。
+
+中证指数公告称自 2026-11-16 起停止计算、维护和发布中证台州综合指数（931176）及中证台州制造30指数（931179）。它们在历史官方目录中的原生字段是 `assetsClassify=股票`、`region=境内`；终止维护是生命周期变化，不是非股票证据。不得据此把旧目录、观测或事件改写成 `out_of_scope`。公告转载可参见[财联社](https://www.cls.cn/detail/2504565)和[第一财经](https://www.yicai.com/news/103393507.html)。
+
 ### `observations.csv`
 
 按 `run_id + provider + index_code` 记录一次采集结果。状态包括 `ok`、`ok_secondary`、`fetch_failed`、`empty_source`、`partial_non_a_members`、`stale_snapshot` 等。发生来源日期回退时，仍保留该快照的 `source_asof` 和本次 `observed_at`，但不更新最新状态或产生事件。错误和空结果始终与“没有成分变化”区分开。
